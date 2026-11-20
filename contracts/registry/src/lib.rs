@@ -23,14 +23,14 @@ mod types;
 mod test;
 
 use sci_common as common;
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 pub use events::{
     AdminChanged, AdminProposed, AttesterAdded, AttesterRemoved, CapacityChanged, Initialized,
-    ProviderRegistered, ProviderStatusChanged, ServiceAvailabilityChanged, ServicePriceScheduled,
-    ServiceRemoved, ServiceUpserted,
+    ProviderCategoryChanged, ProviderRegistered, ProviderStatusChanged, ServiceAvailabilityChanged,
+    ServicePriceScheduled, ServiceRemoved, ServiceUpserted, VerificationEvidenceSet,
 };
-pub use types::{DataKey, Provider, ProviderStatus, RegistryError, ServiceItem};
+pub use types::{DataKey, Provider, ProviderCategory, ProviderStatus, RegistryError, ServiceItem};
 
 use storage::{
     extend_instance, has_admin, has_provider, list_providers_by_country, read_admin, read_attester,
@@ -80,6 +80,7 @@ impl Registry {
         owner: Address,
         name: String,
         country: String,
+        category: ProviderCategory,
     ) -> Result<(), RegistryError> {
         owner.require_auth();
 
@@ -108,6 +109,8 @@ impl Registry {
             status: ProviderStatus::Pending,
             registered_at,
             reason_code: 0,
+            category,
+            verification_evidence: None,
         };
         write_provider(&env, &owner, &provider);
         extend_instance(&env);
@@ -117,6 +120,7 @@ impl Registry {
         let count = storage::read_provider_count(&env);
         storage::write_provider_at(&env, count, &owner);
         storage::write_provider_count(&env, &(count + 1));
+        storage::increment_status_count(&env, ProviderStatus::Pending);
 
         // `CountryCount` for this country is left unset; `read_country_count`
         // returns 0 when absent, so `providers_in` works even if the provider
@@ -128,6 +132,28 @@ impl Registry {
             name,
             country,
             registered_at,
+            category,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Changes a provider's category. Callable by provider owner only.
+    pub fn update_provider_category(
+        env: Env,
+        provider_addr: Address,
+        category: ProviderCategory,
+    ) -> Result<(), RegistryError> {
+        provider_addr.require_auth();
+
+        let mut provider = read_provider(&env, &provider_addr)?;
+        provider.category = category;
+        write_provider(&env, &provider_addr, &provider);
+        extend_instance(&env);
+
+        ProviderCategoryChanged {
+            provider: provider_addr,
+            category,
         }
         .publish(&env);
         Ok(())
@@ -172,6 +198,8 @@ impl Registry {
 
         // Update the per-country index when crossing the Active boundary.
         if prev_status != status {
+            storage::decrement_status_count(&env, prev_status);
+            storage::increment_status_count(&env, status);
             let country = &provider.country;
             match (prev_status, status) {
                 // Provider just became active: add to country index.
@@ -223,6 +251,31 @@ impl Registry {
         Ok(())
     }
 
+    /// Sets the verification evidence hash for a provider. Admin only.
+    ///
+    /// Records an on-chain hash of the verification bundle (licence,
+    /// inspection report) to make provider verification auditable.
+    pub fn set_verification_evidence(
+        env: Env,
+        admin: Address,
+        provider_addr: Address,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), RegistryError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut provider = read_provider(&env, &provider_addr)?;
+        provider.verification_evidence = Some(evidence_hash.clone());
+        write_provider(&env, &provider_addr, &provider);
+        extend_instance(&env);
+
+        VerificationEvidenceSet {
+            provider: provider_addr,
+            evidence_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Lets a provider withdraw from the registry. Its own owner only.
     ///
     /// Clinics close, and a closed clinic that stays listed keeps drawing
@@ -245,10 +298,14 @@ impl Registry {
         if provider.status == ProviderStatus::Retired {
             return Err(RegistryError::InvalidTransition);
         }
+        let prev_status = provider.status;
         provider.status = ProviderStatus::Retired;
         provider.reason_code = reason_code;
         write_provider(&env, &owner, &provider);
         extend_instance(&env);
+
+        storage::decrement_status_count(&env, prev_status);
+        storage::increment_status_count(&env, ProviderStatus::Retired);
 
         ProviderStatusChanged {
             provider: owner,
@@ -472,7 +529,12 @@ impl Registry {
     /// Grants attester rights. Admin only.
     pub fn add_attester(env: Env, admin: Address, attester: Address) -> Result<(), RegistryError> {
         Self::require_admin(&env, &admin)?;
-        write_attester(&env, &attester, true);
+        if !read_attester(&env, &attester) {
+            write_attester(&env, &attester, true);
+            let count = storage::read_attester_count(&env);
+            storage::write_attester_at(&env, count, &attester);
+            storage::write_attester_count(&env, &(count + 1));
+        }
         extend_instance(&env);
         AttesterAdded { attester }.publish(&env);
         Ok(())
@@ -485,7 +547,29 @@ impl Registry {
         attester: Address,
     ) -> Result<(), RegistryError> {
         Self::require_admin(&env, &admin)?;
-        write_attester(&env, &attester, false);
+        if read_attester(&env, &attester) {
+            write_attester(&env, &attester, false);
+            let total = storage::read_attester_count(&env);
+            let mut idx = None;
+            for i in 0..total {
+                if let Some(addr) = storage::read_attester_at(&env, i) {
+                    if addr == attester {
+                        idx = Some(i);
+                        break;
+                    }
+                }
+            }
+            if let Some(i) = idx {
+                let last_idx = total.saturating_sub(1);
+                if i != last_idx {
+                    if let Some(last_addr) = storage::read_attester_at(&env, last_idx) {
+                        storage::write_attester_at(&env, i, &last_addr);
+                    }
+                }
+                storage::remove_attester_at(&env, last_idx);
+                storage::write_attester_count(&env, &(total - 1));
+            }
+        }
         extend_instance(&env);
         AttesterRemoved { attester }.publish(&env);
         Ok(())
@@ -542,6 +626,15 @@ impl Registry {
     /// trusting an indexer.
     pub fn list_providers(env: Env, start: u32, limit: u32) -> Vec<Provider> {
         storage::list_providers(&env, start, limit)
+    }
+
+    /// Returns provider counts by lifecycle status: `(pending, active, suspended)`.
+    pub fn provider_counts(env: Env) -> (u32, u32, u32) {
+        (
+            storage::read_status_count(&env, ProviderStatus::Pending),
+            storage::read_status_count(&env, ProviderStatus::Active),
+            storage::read_status_count(&env, ProviderStatus::Suspended),
+        )
     }
 
     /// The check `voucher` relies on before escrowing any funds.
@@ -628,6 +721,11 @@ impl Registry {
 
     pub fn is_attester(env: Env, addr: Address) -> bool {
         read_attester(&env, &addr)
+    }
+
+    /// Attesters in addition order, paged by `start` and `limit`.
+    pub fn list_attesters(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        storage::list_attesters(&env, start, limit)
     }
 
     /// Most vouchers the clinic accepts outstanding at once; `0` is

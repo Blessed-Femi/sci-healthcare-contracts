@@ -65,6 +65,8 @@ Answers one question: who is allowed to do what.
 ```rust
 pub enum ProviderStatus { Pending = 0, Active = 1, Suspended = 2, Retired = 3 }
 
+pub enum ProviderCategory { Clinic = 0, Pharmacy = 1, Laboratory = 2, Maternity = 3, Other = 4 }
+
 pub struct Provider {
     pub owner: Address,       // receives settlement
     pub name: String,
@@ -72,6 +74,8 @@ pub struct Provider {
     pub status: ProviderStatus,
     pub registered_at: u64,
     pub reason_code: u32,     // why the last status change happened, 0 before any
+    pub category: ProviderCategory,
+    pub verification_evidence: Option<BytesN<32>>,
 }
 
 pub struct ServiceItem {
@@ -90,8 +94,10 @@ pub struct ServiceItem {
 | Function | Parameters | Returns | Auth | Errors |
 | --- | --- | --- | --- | --- |
 | `initialize` | `admin: Address` | `()` | once | `AlreadyInitialized` |
-| `register_provider` | `owner, name, country` | `()` | `owner` | `EmptyName`, `InvalidCountry`, `ProviderExists` |
+| `register_provider` | `owner, name, country, category: ProviderCategory` | `()` | `owner` | `EmptyName`, `InvalidCountry`, `ProviderExists` |
+| `update_provider_category` | `provider_addr, category: ProviderCategory` | `()` | `provider_addr` | `ProviderNotFound` |
 | `set_provider_status` | `admin, provider_addr, status, reason_code: u32` | `()` | `admin` | `NotAuthorized`, `ProviderNotFound`, `InvalidTransition` |
+| `set_verification_evidence` | `admin, provider_addr, evidence_hash: BytesN<32>` | `()` | `admin` | `NotAuthorized`, `ProviderNotFound` |
 | `retire` | `owner, reason_code: u32` | `()` | `owner` | `ProviderNotFound`, `InvalidTransition` |
 | `upsert_service` | `provider_addr, code, label, price` | `()` | `provider_addr` | `InvalidPrice`, `EmptyName`, `ProviderNotActive`, `PriceIncreaseNeedsNotice` |
 | `schedule_service_price` | `provider_addr, code, price, effective_at, confirm_large_change: bool` | `()` | `provider_addr` | `InvalidPrice`, `ProviderNotActive`, `ServiceNotFound`, `PriceNoticeTooShort`, `LargePriceJumpNeedsConfirmation` |
@@ -105,6 +111,7 @@ pub struct ServiceItem {
 | `get_pending_admin` | — | `Option<Address>` | view | — |
 | `get_provider` | `provider_addr` | `Provider` | view | `ProviderNotFound` |
 | `list_providers` | `start, limit: u32` | `Vec<Provider>` | view | — |
+| `provider_counts` | — | `(u32, u32, u32)` | view | — |
 | `providers_in` | `country: String, start, limit: u32` | `Vec<Provider>` | view | — |
 | `is_active_provider` | `provider_addr` | `bool` | view | — |
 | `get_service` | `provider_addr, code` | `ServiceItem` | view | `ServiceNotFound` |
@@ -113,6 +120,7 @@ pub struct ServiceItem {
 | `get_upcoming_price` | `provider_addr, code` | `(i128, u64)` | view | `ServiceNotFound` |
 | `is_service_available` | `provider_addr, code` | `bool` | view | — |
 | `is_attester` | `addr` | `bool` | view | — |
+| `list_attesters` | `start, limit: u32` | `Vec<Address>` | view | — |
 | `get_capacity` | `provider_addr` | `u32` | view | — |
 | `get_admin` | — | `Address` | view | `NotInitialized` |
 | `version` | — | `String` | view | — |
@@ -156,7 +164,9 @@ Every public function, with the exact signer it demands — no signature that is
 | --- | --- |
 | `initialize` | none (one-shot) |
 | `register_provider` | `owner` |
+| `update_provider_category` | `provider_addr` |
 | `set_provider_status` | `admin` |
+| `set_verification_evidence` | `admin` |
 | `retire` | `owner` |
 | `upsert_service` | `provider_addr` |
 | `schedule_service_price` | `provider_addr` |
@@ -171,6 +181,7 @@ Every public function, with the exact signer it demands — no signature that is
 | `get_pending_admin` | none (view) |
 | `get_provider` | none (view) |
 | `list_providers` | none (view) |
+| `provider_counts` | none (view) |
 | `providers_in` | none (view) |
 | `is_active_provider` | none (view) |
 | `get_service` | none (view) |
@@ -179,6 +190,7 @@ Every public function, with the exact signer it demands — no signature that is
 | `get_upcoming_price` | none (view) |
 | `is_service_available` | none (view) |
 | `is_attester` | none (view) |
+| `list_attesters` | none (view) |
 | `get_capacity` | none (view) |
 | `version` | none (view) |
 
@@ -209,8 +221,10 @@ A signer is not the same as a role: `admin` must be the stored admin **and** sig
 | Event | Topics | Data |
 | --- | --- | --- |
 | `initialized` | — | `admin` |
-| `provider_registered` | `provider` | `name`, `country`, `registered_at` |
+| `provider_registered` | `provider` | `name`, `country`, `registered_at`, `category` |
+| `provider_category_changed` | `provider` | `category` |
 | `provider_status_changed` | `provider` | `status`, `reason_code` |
+| `verification_evidence_set` | `provider` | `evidence_hash` |
 | `service_upserted` | `provider`, `code` | `label`, `price` |
 | `service_removed` | `provider` | `code` |
 | `service_price_scheduled` | `provider`, `code` | `price`, `effective_at` |
