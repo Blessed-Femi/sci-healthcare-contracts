@@ -128,6 +128,7 @@
 Tests: 229 (was 222).
 Tests: 222 (was 195).
 - `examples/lifecycle.ts`: a runnable TypeScript walkthrough of the full voucher lifecycle (fund → claim → attest → settle) using `@stellar/stellar-sdk` and local keys, with a README section and a CI type-check job. See "Run the lifecycle in TypeScript".
+- **build:** `rust-version = "1.96"` in the workspace `Cargo.toml`, inherited by every contract, so downstream crates can read the minimum supported Rust version from `cargo metadata`. A new CI `msrv` job builds with exactly that toolchain and fails if the declared version and the toolchain it runs drift apart; the policy for raising it is in [`CONTRIBUTING.md`](CONTRIBUTING.md#minimum-supported-rust-version). Closes #260.
 
 ## 0.2.0 — 2026-10-09
 
