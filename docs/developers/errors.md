@@ -103,8 +103,8 @@ Source: `ReceiptError` in `contracts/receipt/src/lib.rs`.
 | 6 | `InvalidAmount` | The amount is zero or negative. | Pass a positive amount. |
 | 7 | `NoPendingAdmin` | `accept_admin` was called with no nomination waiting. | Have the current admin call `propose_admin` first. |
 | 8 | `NoPendingMinter` | `accept_minter` was called with no minter nomination waiting. | Have the admin call `propose_minter` first. |
-| 9 | `MathOverflow` | A global or provider receipt count or total would overflow. | The mint is refused; report it. |
-| 10 | `BatchTooLarge` | `bump` received more than `MAX_RECEIPTS_PER_BUMP` ids. | Split the ids into batches of at most 50. |
+| 9 | `MathOverflow` | A provider's receipt count or total would overflow. | The mint is refused; report it. |
+| 10 | `AmountSplitMismatch` | `fee + net` did not equal `amount`. | The receipt would misstate what the clinic received; mint again with the split the settlement paid. |
 
 ## faucet (testnet only)
 
