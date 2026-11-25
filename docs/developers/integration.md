@@ -556,9 +556,10 @@ Two clinics' indexes are separate, so this list never includes another
 clinic's receipts.
 
 Anyone can call `bump(ids)` to extend the TTL of existing receipts without
-changing their fields. It accepts at most 50 voucher ids per call; split larger
-sets into batches. Missing ids are ignored. The caller pays the transaction
-fee, but no role or patient signature is required.
+changing their fields. Reading an id restores its receipt if it has been
+archived before extending the TTL. It accepts at most 50 voucher ids per call;
+split larger sets into batches. Missing ids are ignored. The caller pays the
+transaction fee, but no role or patient signature is required.
 
 The indexer holds only public on-chain data and needs the same 64-character
 reference. It cannot enumerate patients without the key.

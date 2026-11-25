@@ -577,7 +577,7 @@ Receipts are soulbound: there is deliberately no transfer function, so a receipt
 
 **`totals`** returns the protocol-wide `(receipt_count, total_amount)` and is updated atomically by every successful `mint`. Both counters use checked arithmetic and refuse an overflowing mint with `MathOverflow` (#9). On an already-deployed instance, the aggregate starts at zero and counts mints after this change; it does not reconstruct older receipts.
 
-**`bump(ids)`** is permissionless and extends the persistent TTL of existing receipts without reading or changing their fields. It accepts at most `MAX_RECEIPTS_PER_BUMP` (50) ids; larger batches fail with `BatchTooLarge` (#10), and missing ids are ignored. Split larger lists into separate calls.
+**`bump(ids)`** is permissionless and extends the persistent TTL of existing receipts without changing their fields. Reading each id restores an archived entry before its TTL is extended. It accepts at most `MAX_RECEIPTS_PER_BUMP` (50) ids; larger batches fail with `BatchTooLarge` (#10), and missing ids are ignored. Split larger lists into separate calls.
 
 ### Authorisation matrix
 
