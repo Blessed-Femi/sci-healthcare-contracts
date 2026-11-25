@@ -147,6 +147,7 @@
     [],
     [],
     [],
+    [],
     []
   ],
   "ledger": {
@@ -755,6 +756,30 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "TotalAmount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "i128": "80000005"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "TotalCount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 4
                       }
                     }
                   ]

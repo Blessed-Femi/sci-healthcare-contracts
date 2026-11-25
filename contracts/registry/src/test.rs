@@ -3,7 +3,9 @@
 use std::string::ToString;
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    contract, contractimpl, contracttype,
+    testutils::{Address as _, IssuerFlags, Ledger as _},
+    token::{self},
     Address, BytesN, Env, String, Vec,
 };
 
@@ -62,6 +64,64 @@ fn register_active_provider(f: &Fixture) -> Address {
     provider
 }
 
+fn configure_deposit(f: &Fixture, owner: &Address, amount: i128) -> (Address, Address) {
+    let issuer = Address::generate(&f.env);
+    let sac = f.env.register_stellar_asset_contract_v2(issuer);
+    sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+    let token_addr = sac.address();
+    let fee_account = Address::generate(&f.env);
+    token::StellarAssetClient::new(&f.env, &token_addr).mint(owner, &100);
+    f.client
+        .set_registration_deposit(&f.admin, &token_addr, &amount, &fee_account);
+    (token_addr, fee_account)
+}
+
+fn assert_deposit_balance(f: &Fixture, token_addr: &Address, pending_amounts: &[i128]) {
+    let expected: i128 = pending_amounts.iter().sum();
+    let token = token::Client::new(&f.env, token_addr);
+    assert_eq!(token.balance(&f.client.address), expected);
+}
+
+#[contract]
+struct SkimmingToken;
+
+#[contracttype]
+#[derive(Clone)]
+enum SkimmingTokenKey {
+    Balance(Address),
+}
+
+#[contractimpl]
+impl SkimmingToken {
+    pub fn mint(env: Env, owner: Address, amount: i128) {
+        let key = SkimmingTokenKey::Balance(owner);
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(balance + amount));
+    }
+
+    pub fn balance(env: Env, owner: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&SkimmingTokenKey::Balance(owner))
+            .unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        let from_key = SkimmingTokenKey::Balance(from.clone());
+        let from_balance: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_balance - amount));
+
+        let to_key = SkimmingTokenKey::Balance(to.clone());
+        let to_balance: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&to_key, &(to_balance + amount - 1));
+    }
+}
+
 #[test]
 fn initialize_sets_admin() {
     let f = setup();
@@ -101,6 +161,232 @@ fn provider_registers_as_pending() {
     assert_eq!(stored.owner, provider);
     // Pending is not billable.
     assert!(!f.client.is_active_provider(&provider));
+}
+
+#[test]
+fn zero_registration_deposit_preserves_existing_behavior() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    assert_eq!(f.client.registration_deposit(), None);
+    f.client.set_registration_deposit(
+        &f.admin,
+        &Address::generate(&f.env),
+        &0,
+        &Address::generate(&f.env),
+    );
+    assert_eq!(f.client.registration_deposit().unwrap().amount, 0);
+
+    f.client.register_provider(
+        &provider,
+        &String::from_str(&f.env, "Clinic"),
+        &String::from_str(&f.env, "NG"),
+        &ProviderCategory::Clinic,
+    );
+    assert_eq!(
+        f.client.get_provider(&provider).status,
+        ProviderStatus::Pending
+    );
+    let key = crate::DataKey::RegistrationDeposit(provider);
+    assert!(!f.env.as_contract(&f.client.address, || {
+        f.env.storage().persistent().has(&key)
+    }));
+}
+
+#[test]
+fn registration_deposit_is_refunded_on_activation_and_withdrawal() {
+    let f = setup();
+    let first = Address::generate(&f.env);
+    let second = Address::generate(&f.env);
+    let (token_addr, _) = configure_deposit(&f, &first, 30);
+    token::StellarAssetClient::new(&f.env, &token_addr).mint(&second, &100);
+
+    for provider in [&first, &second] {
+        f.client.register_provider(
+            provider,
+            &String::from_str(&f.env, "Clinic"),
+            &String::from_str(&f.env, "NG"),
+            &ProviderCategory::Clinic,
+        );
+    }
+    assert_deposit_balance(&f, &token_addr, &[30, 30]);
+
+    f.client
+        .set_provider_status(&f.admin, &first, &ProviderStatus::Active, &REASON_VERIFIED);
+    assert_eq!(token::Client::new(&f.env, &token_addr).balance(&first), 100);
+    assert_deposit_balance(&f, &token_addr, &[30]);
+
+    f.client.retire(&second, &REASON_VERIFIED);
+    assert_eq!(
+        token::Client::new(&f.env, &token_addr).balance(&second),
+        100
+    );
+    assert_deposit_balance(&f, &token_addr, &[]);
+}
+
+#[test]
+fn rejected_pending_provider_deposit_goes_to_fee_account() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    let (token_addr, fee_account) = configure_deposit(&f, &provider, 25);
+    f.client.register_provider(
+        &provider,
+        &String::from_str(&f.env, "Clinic"),
+        &String::from_str(&f.env, "NG"),
+        &ProviderCategory::Clinic,
+    );
+    assert_deposit_balance(&f, &token_addr, &[25]);
+
+    f.client.set_provider_status(
+        &f.admin,
+        &provider,
+        &ProviderStatus::Suspended,
+        &REASON_FRAUD,
+    );
+
+    assert_eq!(
+        token::Client::new(&f.env, &token_addr).balance(&fee_account),
+        25
+    );
+    assert_deposit_balance(&f, &token_addr, &[]);
+}
+
+#[test]
+fn deposit_terms_are_snapshotted_per_registration() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    let (old_token, old_fee) = configure_deposit(&f, &provider, 25);
+
+    f.client.register_provider(
+        &provider,
+        &String::from_str(&f.env, "Clinic"),
+        &String::from_str(&f.env, "NG"),
+        &ProviderCategory::Clinic,
+    );
+    let new_token = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    f.client
+        .set_registration_deposit(&f.admin, &new_token, &40, &Address::generate(&f.env));
+    let updated_config = f.client.registration_deposit().unwrap();
+    assert_eq!(updated_config.token, new_token);
+    assert_eq!(updated_config.amount, 40);
+
+    f.client.set_provider_status(
+        &f.admin,
+        &provider,
+        &ProviderStatus::Suspended,
+        &REASON_FRAUD,
+    );
+    assert_eq!(token::Client::new(&f.env, &old_token).balance(&old_fee), 25);
+    assert_deposit_balance(&f, &old_token, &[]);
+}
+
+#[test]
+fn deposit_config_rejects_negative_amounts() {
+    let f = setup();
+    let token = Address::generate(&f.env);
+    let fee_account = Address::generate(&f.env);
+    let err = f
+        .client
+        .try_set_registration_deposit(&f.admin, &token, &-1, &fee_account)
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::InvalidDepositAmount);
+}
+
+#[test]
+fn deposit_transfer_failure_does_not_register_provider() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    let (token_addr, _) = configure_deposit(&f, &provider, 25);
+    token::StellarAssetClient::new(&f.env, &token_addr).burn(&provider, &100);
+
+    let err = f
+        .client
+        .try_register_provider(
+            &provider,
+            &String::from_str(&f.env, "Clinic"),
+            &String::from_str(&f.env, "NG"),
+            &ProviderCategory::Clinic,
+        )
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::TokenTransferFailed);
+    assert!(f.client.try_get_provider(&provider).is_err());
+    assert_deposit_balance(&f, &token_addr, &[]);
+}
+
+#[test]
+fn non_exact_deposit_transfer_is_rejected_atomically() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    let fee_account = Address::generate(&f.env);
+    let token_addr = f.env.register(SkimmingToken, ());
+    let token = SkimmingTokenClient::new(&f.env, &token_addr);
+    token.mint(&provider, &100);
+    f.client
+        .set_registration_deposit(&f.admin, &token_addr, &25, &fee_account);
+
+    let err = f
+        .client
+        .try_register_provider(
+            &provider,
+            &String::from_str(&f.env, "Clinic"),
+            &String::from_str(&f.env, "NG"),
+            &ProviderCategory::Clinic,
+        )
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::TokenAmountMismatch);
+    assert_eq!(token.balance(&provider), 100);
+    assert_eq!(token.balance(&f.client.address), 0);
+    assert!(f.client.try_get_provider(&provider).is_err());
+}
+
+#[test]
+fn failed_deposit_release_leaves_pending_deposit_intact() {
+    let f = setup();
+    let provider = Address::generate(&f.env);
+    let (token_addr, fee_account) = configure_deposit(&f, &provider, 25);
+    f.client.register_provider(
+        &provider,
+        &String::from_str(&f.env, "Clinic"),
+        &String::from_str(&f.env, "NG"),
+        &ProviderCategory::Clinic,
+    );
+
+    let issuer = token::StellarAssetClient::new(&f.env, &token_addr);
+    issuer.set_authorized(&fee_account, &false);
+    let err = f
+        .client
+        .try_set_provider_status(
+            &f.admin,
+            &provider,
+            &ProviderStatus::Suspended,
+            &REASON_FRAUD,
+        )
+        .err()
+        .unwrap()
+        .unwrap();
+    assert_eq!(err, RegistryError::TokenTransferFailed);
+    assert_eq!(
+        f.client.get_provider(&provider).status,
+        ProviderStatus::Pending
+    );
+    assert_deposit_balance(&f, &token_addr, &[25]);
+
+    issuer.set_authorized(&fee_account, &true);
+    f.client.set_provider_status(
+        &f.admin,
+        &provider,
+        &ProviderStatus::Suspended,
+        &REASON_FRAUD,
+    );
+    assert_deposit_balance(&f, &token_addr, &[]);
 }
 
 #[test]
@@ -1468,6 +1754,14 @@ const AUTH_MATRIX: &[AuthCase] = &[
         auth: Auth::Free("none (one-shot)"),
     },
     AuthCase {
+        function: "set_registration_deposit",
+        auth: signer("`admin`", admin_addr),
+    },
+    AuthCase {
+        function: "registration_deposit",
+        auth: Auth::Free("none (view)"),
+    },
+    AuthCase {
         function: "register_provider",
         auth: signer("`owner`", new_provider_addr),
     },
@@ -1635,7 +1929,14 @@ fn run_case(f: &AuthFixture, function: &str) -> CaseRun {
             RegistryClient::new(&env, &address).initialize(&Address::generate(&env));
             return case_run(&env);
         }
+        "set_registration_deposit" => {
+            client.set_registration_deposit(&f.f.admin, &f.provider, &5, &f.new_provider);
+        }
+        "registration_deposit" => {
+            client.registration_deposit();
+        }
         "register_provider" => {
+            configure_deposit(&f.f, &f.new_provider, 5);
             client.register_provider(
                 &f.new_provider,
                 &label("Lagos Clinic"),
@@ -1648,11 +1949,17 @@ fn run_case(f: &AuthFixture, function: &str) -> CaseRun {
             client.update_provider_category(&f.provider, &ProviderCategory::Pharmacy);
         }
         "set_provider_status" => {
-            activate(&f.f, &f.provider);
+            configure_deposit(&f.f, &f.provider, 5);
+            client.register_provider(
+                &f.provider,
+                &label("Lagos Clinic"),
+                &label("NG"),
+                &ProviderCategory::Clinic,
+            );
             client.set_provider_status(
                 &f.f.admin,
                 &f.provider,
-                &ProviderStatus::Suspended,
+                &ProviderStatus::Active,
                 &REASON_VERIFIED,
             );
         }
@@ -1662,7 +1969,13 @@ fn run_case(f: &AuthFixture, function: &str) -> CaseRun {
             client.set_verification_evidence(&f.f.admin, &f.provider, &hash);
         }
         "retire" => {
-            activate(&f.f, &f.provider);
+            configure_deposit(&f.f, &f.provider, 5);
+            client.register_provider(
+                &f.provider,
+                &label("Lagos Clinic"),
+                &label("NG"),
+                &ProviderCategory::Clinic,
+            );
             client.retire(&f.provider, &REASON_VERIFIED);
         }
         "upsert_service" => {

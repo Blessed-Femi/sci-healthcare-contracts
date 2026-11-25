@@ -55,7 +55,7 @@ bytes to that entry and its rent.
 | `voucher` | contract instance (`Config`, `NextId`, `OpenEscrow`, `AttestationCap`) | persistent | 518400 | 668 | 0.3340000 | 3340000 |
 | `voucher` | `Voucher(id)` | persistent | 1555200 | 336 | 0.5040000 | 5040000 |
 | `voucher` | `Attestations(attester, day)` | temporary | 34560 | 148 | 0.0024667 | 24667 |
-| `receipt` | contract instance (`Admin`, `Minter`) | persistent | 518400 | 244 | 0.1220000 | 1220000 |
+| `receipt` | contract instance (`Admin`, `Minter`) | persistent | 518400 | 336 | 0.1680000 | 1680000 |
 | `receipt` | `Receipt(voucher_id)` | persistent | 1555200 | 356 | 0.5340000 | 5340000 |
 | `receipt` | `Count(beneficiary_ref)` | persistent | 1555200 | 132 | 0.1980000 | 1980000 |
 | `receipt` | `ProviderCount(provider)` | persistent | 1555200 | 140 | 0.2100000 | 2100000 |
@@ -64,8 +64,8 @@ bytes to that entry and its rent.
 The contract instance is one ledger entry shared by every key kept in instance
 storage. `PendingAdmin` (registry and voucher) and `PendingMinter` (receipt)
 live in that same entry, so a handover in progress makes it a little larger
-rather than creating a separate entry. The table shows the ordinary state with
-no handover pending.
+rather than creating a separate entry. Receipt's global count and amount totals
+also live there. The table shows the ordinary state with no handover pending.
 
 `OpenEscrow` and `NextId` are written by `create_voucher`; `AttestationCap` is
 written by the admin, and the instance row above includes it. A deployment

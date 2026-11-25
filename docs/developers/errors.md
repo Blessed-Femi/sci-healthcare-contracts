@@ -43,6 +43,9 @@ Source: `RegistryError` in `contracts/registry/src/types.rs`.
 | 14 | `InvalidTransition` | The status change is not an allowed transition, or would leave `Retired`. | Check the allowed transitions in the contract reference. |
 | 15 | `LargePriceJumpNeedsConfirmation` | The scheduled price is `MAX_PRICE_JUMP` times the current one or more. | Fix the typo, or pass `confirm_large_change = true` if it is intended. |
 | 16 | `MissingReasonCode` | `set_provider_status` was called with `reason_code` 0. | Pass a non-zero reason code from the trust model. |
+| 17 | `InvalidDepositAmount` | The admin configured a negative registration deposit. | Configure an amount of zero or more. |
+| 18 | `TokenTransferFailed` | The registration token rejected a balance read or transfer. | Check the token configuration, provider balance and recipient authorization, then retry. |
+| 19 | `TokenAmountMismatch` | A deposit transfer moved a different amount than requested. | Configure a token that transfers exact amounts. |
 
 ## voucher
 
@@ -100,7 +103,8 @@ Source: `ReceiptError` in `contracts/receipt/src/lib.rs`.
 | 6 | `InvalidAmount` | The amount is zero or negative. | Pass a positive amount. |
 | 7 | `NoPendingAdmin` | `accept_admin` was called with no nomination waiting. | Have the current admin call `propose_admin` first. |
 | 8 | `NoPendingMinter` | `accept_minter` was called with no minter nomination waiting. | Have the admin call `propose_minter` first. |
-| 9 | `MathOverflow` | A provider's receipt count or total would overflow. | The mint is refused; report it. |
+| 9 | `MathOverflow` | A global or provider receipt count or total would overflow. | The mint is refused; report it. |
+| 10 | `BatchTooLarge` | `bump` received more than `MAX_RECEIPTS_PER_BUMP` ids. | Split the ids into batches of at most 50. |
 
 ## faucet (testnet only)
 

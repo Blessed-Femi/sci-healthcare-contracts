@@ -70,6 +70,8 @@ pub struct ReceiptMinted {
 /// Caps the response so a clinic with a long history cannot make a single
 /// read exceed the host's resource limits; callers page with `start`.
 pub const MAX_RECEIPTS_PAGE: u32 = 50;
+/// Maximum receipt ids one `bump` call may extend.
+pub const MAX_RECEIPTS_PER_BUMP: u32 = 50;
 
 /// Human-readable name wallets and explorers show for a receipt.
 const RECEIPT_NAME: &str = "SCI Care Receipt";
@@ -116,6 +118,10 @@ pub enum DataKey {
     /// Running total of the amounts of a provider's receipts: the money side
     /// of the clinic's on-chain track record, read by `provider_stats`.
     ProviderTotal(Address),
+    /// Global number of receipts minted.
+    TotalCount,
+    /// Global total amount paid for settled care.
+    TotalAmount,
 }
 
 #[contracterror]
@@ -130,10 +136,10 @@ pub enum ReceiptError {
     InvalidAmount = 6,
     NoPendingAdmin = 7,
     NoPendingMinter = 8,
-    /// A provider's receipt count or running total would have overflowed.
-    /// Wrapping either one would understate a clinic's track record, so the
-    /// mint is refused instead.
+    /// A global or provider receipt count or total would have overflowed.
+    /// Wrapping one would understate settled care, so the mint is refused.
     MathOverflow = 9,
+    BatchTooLarge = 10,
 }
 
 /// Maps the shared helpers' failures onto this contract's error numbers, so
@@ -235,6 +241,23 @@ impl ReceiptBook {
             return Err(ReceiptError::ReceiptExists);
         }
 
+        let total_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalCount)
+            .unwrap_or(0);
+        let next_total_count = total_count
+            .checked_add(1)
+            .ok_or(ReceiptError::MathOverflow)?;
+        let total_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalAmount)
+            .unwrap_or(0);
+        let next_total_amount = total_amount
+            .checked_add(amount)
+            .ok_or(ReceiptError::MathOverflow)?;
+
         let settled_at = env.ledger().timestamp();
         let receipt = Receipt {
             voucher_id,
@@ -290,6 +313,13 @@ impl ReceiptBook {
             .persistent()
             .set(&provider_total_key, &next_provider_total);
         common::extend_persistent(&env, &provider_total_key);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCount, &next_total_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalAmount, &next_total_amount);
+        common::extend_instance(&env);
 
         ReceiptMinted {
             beneficiary_ref,
@@ -342,6 +372,24 @@ impl ReceiptBook {
         Ok(receipt)
     }
 
+    /// Extends the TTL of up to `MAX_RECEIPTS_PER_BUMP` existing receipts.
+    ///
+    /// Anyone may call this. Reading each entry restores an archived receipt
+    /// before its TTL is extended. Missing ids are ignored; receipt fields and
+    /// all other storage remain unchanged.
+    pub fn bump(env: Env, ids: Vec<u64>) -> Result<(), ReceiptError> {
+        if ids.len() > MAX_RECEIPTS_PER_BUMP {
+            return Err(ReceiptError::BatchTooLarge);
+        }
+        for voucher_id in ids {
+            let key = DataKey::Receipt(voucher_id);
+            if env.storage().persistent().get::<_, Receipt>(&key).is_some() {
+                common::extend_persistent(&env, &key);
+            }
+        }
+        Ok(())
+    }
+
     /// How many settled care episodes this beneficiary reference has.
     ///
     /// Extends the counter's TTL like every other persistent read: a patient
@@ -386,6 +434,25 @@ impl ReceiptBook {
         };
 
         (count, total)
+    }
+
+    /// Protocol-wide settled receipt count and total amount.
+    ///
+    /// Both values are maintained on every successful mint with checked
+    /// arithmetic. Reading them extends the contract instance TTL.
+    pub fn totals(env: Env) -> (u32, i128) {
+        common::extend_instance(&env);
+        let count = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalCount)
+            .unwrap_or(0);
+        let amount = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalAmount)
+            .unwrap_or(0);
+        (count, amount)
     }
 
     /// A clinic's receipts in mint order, newest last.
